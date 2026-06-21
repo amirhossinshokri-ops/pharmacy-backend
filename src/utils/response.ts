@@ -1,11 +1,17 @@
-import { Response } from 'express';
+import { Response } from 'express'
+import { serializeBigInt } from './bigint'
 
 interface ApiResponse<T = unknown> {
-  success: boolean;
-  message: string;
-  data?: T;
-  meta?: Record<string, unknown>;
-  errors?: Record<string, string[]>;
+  success: boolean
+  message: string
+  data?: T
+  meta?: Record<string, unknown>
+  errors?: Record<string, string[]>
+}
+
+const safeJson = (res: Response, status: number, body: unknown) => {
+  const serialized = serializeBigInt(body)
+  return res.status(status).json(serialized)
 }
 
 export const sendSuccess = <T>(
@@ -15,10 +21,10 @@ export const sendSuccess = <T>(
   statusCode = 200,
   meta?: Record<string, unknown>
 ) => {
-  const response: ApiResponse<T> = { success: true, message, data };
-  if (meta) response.meta = meta;
-  return res.status(statusCode).json(response);
-};
+  const body: ApiResponse<T> = { success: true, message, data }
+  if (meta) body.meta = meta
+  return safeJson(res, statusCode, body)
+}
 
 export const sendError = (
   res: Response,
@@ -26,25 +32,25 @@ export const sendError = (
   statusCode = 400,
   errors?: Record<string, string[]>
 ) => {
-  const response: ApiResponse = { success: false, message };
-  if (errors) response.errors = errors;
-  return res.status(statusCode).json(response);
-};
+  const body: ApiResponse = { success: false, message }
+  if (errors) body.errors = errors
+  return safeJson(res, statusCode, body)
+}
 
 export const sendCreated = <T>(
   res: Response,
   data: T,
   message = 'با موفقیت ایجاد شد'
-) => sendSuccess(res, data, message, 201);
+) => sendSuccess(res, data, message, 201)
 
 export const sendNotFound = (res: Response, message = 'یافت نشد') =>
-  sendError(res, message, 404);
+  sendError(res, message, 404)
 
 export const sendUnauthorized = (res: Response, message = 'دسترسی غیرمجاز') =>
-  sendError(res, message, 401);
+  sendError(res, message, 401)
 
 export const sendForbidden = (res: Response, message = 'دسترسی ممنوع') =>
-  sendError(res, message, 403);
+  sendError(res, message, 403)
 
 export const sendServerError = (res: Response, message = 'خطای سرور') =>
-  sendError(res, message, 500);
+  sendError(res, message, 500)
