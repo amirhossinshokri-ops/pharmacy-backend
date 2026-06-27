@@ -1,45 +1,68 @@
-import Redis from 'ioredis';
-import logger from '../utils/logger';
+import Redis from 'ioredis'
+import logger from '../utils/logger'
 
-const redis = new Redis({
-  host: process.env.REDIS_HOST || 'localhost',
-  port: parseInt(process.env.REDIS_PORT || '6379'),
-  password: process.env.REDIS_PASSWORD || undefined,
-  retryStrategy: (times) => {
-    if (times > 3) {
-      logger.error('Redis connection failed after 3 retries');
-      return null;
-    }
-    return Math.min(times * 200, 1000);
-  },
-});
+let redis: Redis | null = null
 
-redis.on('connect', () => logger.info('✅ Redis connected'));
-redis.on('error', (err) => logger.error('Redis error:', err));
+try {
+  const redisUrl = process.env.REDIS_URL
+  const redisConfig = redisUrl
+    ? { connectionString: redisUrl }
+    : {
+        host: process.env.REDIS_HOST || 'localhost',
+        port: parseInt(process.env.REDIS_PORT || '6379'),
+        password: process.env.REDIS_PASSWORD || undefined,
+      }
 
-// Blacklist revoked access tokens (expires with token TTL)
+  redis = redisUrl
+    ? new Redis(redisUrl, { maxRetriesPerRequest: 1, connectTimeout: 5000, lazyConnect: true })
+    : new Redis({ ...redisConfig as any, maxRetriesPerRequest: 1, connectTimeout: 5000, lazyConnect: true })
+
+  redis.on('connect', () => logger.info('✅ Redis connected'))
+  redis.on('error', () => {
+    // silently ignore - redis is optional
+  })
+
+  redis.connect().catch(() => {
+    logger.warn('⚠️ Redis not available - caching disabled')
+    redis = null
+  })
+} catch {
+  logger.warn('⚠️ Redis not available - caching disabled')
+  redis = null
+}
+
 export const blacklistToken = async (token: string, ttlSeconds: number) => {
-  await redis.setex(`bl:${token}`, ttlSeconds, '1');
-};
+  if (!redis) return
+  try { await redis.setex(`bl:${token}`, ttlSeconds, '1') } catch {}
+}
 
 export const isTokenBlacklisted = async (token: string): Promise<boolean> => {
-  const result = await redis.get(`bl:${token}`);
-  return result !== null;
-};
+  if (!redis) return false
+  try {
+    const result = await redis.get(`bl:${token}`)
+    return result !== null
+  } catch { return false }
+}
 
-// Cache helpers
 export const setCache = async (key: string, value: unknown, ttlSeconds = 300) => {
-  await redis.setex(`cache:${key}`, ttlSeconds, JSON.stringify(value));
-};
+  if (!redis) return
+  try { await redis.setex(`cache:${key}`, ttlSeconds, JSON.stringify(value)) } catch {}
+}
 
 export const getCache = async <T>(key: string): Promise<T | null> => {
-  const data = await redis.get(`cache:${key}`);
-  return data ? (JSON.parse(data) as T) : null;
-};
+  if (!redis) return null
+  try {
+    const data = await redis.get(`cache:${key}`)
+    return data ? (JSON.parse(data) as T) : null
+  } catch { return null }
+}
 
 export const deleteCache = async (pattern: string) => {
-  const keys = await redis.keys(`cache:${pattern}*`);
-  if (keys.length > 0) await redis.del(...keys);
-};
+  if (!redis) return
+  try {
+    const keys = await redis.keys(`cache:${pattern}*`)
+    if (keys.length > 0) await redis.del(...keys)
+  } catch {}
+}
 
-export default redis;
+export default redis
