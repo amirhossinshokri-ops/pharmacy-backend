@@ -73,8 +73,8 @@ app.use(`${API}/cart`, cartRoutes)
 app.use(`${API}/wishlist`, wishlistRoutes)
 app.use(`${API}/orders`, orderRoutes)
 app.use(`${API}/admin`, adminRoutes)
+app.use(`${API}/chat`, chatRoutes)
 
 app.use(notFound)
 app.use(errorHandler)
-app.use(`${API}/chat`, chatRoutes)
 export default app
