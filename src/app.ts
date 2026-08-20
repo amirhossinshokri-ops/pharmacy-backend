@@ -5,7 +5,7 @@ import compression from 'compression'
 import morgan from 'morgan'
 import path from 'path'
 import rateLimit from 'express-rate-limit'
-
+import chatRoutes from './routes/chat.routes'
 import authRoutes from './routes/auth.routes'
 import productRoutes from './routes/product.routes'
 import categoryRoutes from './routes/category.routes'
@@ -15,6 +15,7 @@ import orderRoutes from './routes/order.routes'
 import adminRoutes from './routes/admin.routes'
 import { notFound, errorHandler } from './middleware/error.middleware'
 import logger from './utils/logger'
+
 
 const app = express()
 
@@ -75,5 +76,5 @@ app.use(`${API}/admin`, adminRoutes)
 
 app.use(notFound)
 app.use(errorHandler)
-
+app.use(`${API}/chat`, chatRoutes)
 export default app
