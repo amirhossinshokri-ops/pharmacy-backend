@@ -94,7 +94,7 @@ export const sendChatMessage = async (
           maxOutputTokens: 350,
         },
       },
-      { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
+      { headers: { 'Content-Type': 'application/json' }, timeout: 60000 }
     )
 
     const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text
