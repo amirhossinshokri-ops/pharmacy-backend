@@ -7,14 +7,7 @@ import {
   type RetrievedProduct,
 } from './product-retrieval.service'
 
-<<<<<<< HEAD
 export interface ChatMessage {
-=======
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY
-const GEMINI_URL =`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent`
-
-interface ChatMessage {
->>>>>>> 4f72002dfe2c515da81a18a4e5ba7512a063b64d
   role: 'user' | 'model'
   text: string
 }
@@ -99,7 +92,6 @@ export const sendChatMessage = async (
 
   const intent = detectIntent(userMessage)
 
-<<<<<<< HEAD
   let products: RetrievedProduct[] = []
   if (intent.isProductQuery) {
     // Try exact name match first (handles "do you have X" queries precisely)
@@ -109,35 +101,6 @@ export const sendChatMessage = async (
     } else {
       products = await searchRelevantProducts(userMessage, intent, MAX_RETRIEVED_PRODUCTS)
     }
-=======
-    const contents = [
-      { role: 'user', parts: [{ text: systemPrompt }] },
-      { role: 'model', parts: [{ text: 'متوجه شدم. من فقط محصولات موجود در فروشگاه را معرفی می‌کنم و آماده راهنمایی کاربران هستم.' }] },
-      ...history.map(h => ({ role: h.role, parts: [{ text: h.text }] })),
-      { role: 'user', parts: [{ text: userMessage }] },
-    ]
-
-    const { data } = await axios.post(
-      `${GEMINI_URL}?key=${GEMINI_API_KEY}`,
-      {
-        contents,
-        generationConfig: {
-          temperature: 0.6,
-          maxOutputTokens: 350,
-        },
-      },
-      { headers: { 'Content-Type': 'application/json' }, timeout: 60000 }
-    )
-
-    const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text
-    if (!reply) throw new AppError('پاسخی دریافت نشد', 500)
-
-    return reply.trim()
-  } catch (err: any) {
-    if (err instanceof AppError) throw err
-    console.error('Gemini API error:', err.response?.data || err.message)
-    throw new AppError('خطا در ارتباط با سرویس چت. لطفاً دوباره تلاش کنید', 500)
->>>>>>> 4f72002dfe2c515da81a18a4e5ba7512a063b64d
   }
 
   const productContext = buildProductContext(products)
