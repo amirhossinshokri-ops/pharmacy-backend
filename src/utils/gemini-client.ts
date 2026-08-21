@@ -4,8 +4,11 @@ import logger from '../utils/logger'
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash'
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
-const REQUEST_TIMEOUT_MS = 30000 // 30s — reasonable for production, not excessive
-const MAX_RETRIES = 2
+
+// Keep well under typical platform/proxy timeouts (Railway/Netlify edge ~ often 10-30s).
+// We must leave headroom for our own retry logic too.
+const REQUEST_TIMEOUT_MS = 12000
+const MAX_RETRIES = 1 // total attempts = 2, to stay within overall latency budget
 
 export interface GeminiContent {
   role: 'user' | 'model'
@@ -19,18 +22,13 @@ interface GeminiCallResult {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 const isRetryableStatus = (status?: number): boolean => {
-  if (!status) return true // network error, no response
+  if (!status) return true
   return status === 429 || status >= 500
 }
 
-/**
- * Calls Gemini's generateContent endpoint with limited retries
- * (exponential backoff) for transient failures only. Never logs
- * the API key, prompt content, or user data.
- */
 export const callGemini = async (
   contents: GeminiContent[],
-  maxOutputTokens = 400
+  maxOutputTokens = 700
 ): Promise<GeminiCallResult> => {
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey) {
@@ -52,6 +50,12 @@ export const callGemini = async (
             temperature: 0.6,
             maxOutputTokens,
           },
+          safetySettings: [
+            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
+            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
+            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
+            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_ONLY_HIGH' },
+          ],
         },
         {
           headers: {
@@ -62,10 +66,22 @@ export const callGemini = async (
         }
       )
 
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text
+      const candidate = data?.candidates?.[0]
+      const finishReason = candidate?.finishReason
+      const text = candidate?.content?.parts?.[0]?.text
+
+      if (finishReason === 'SAFETY') {
+        logger.warn('Gemini blocked response due to safety filters')
+        throw new AppError('متأسفانه نمی‌توانم به این سوال پاسخ دهم', 400)
+      }
+
       if (!text) {
-        logger.warn('Gemini returned no text in response')
+        logger.warn(`Gemini returned no text. finishReason=${finishReason ?? 'unknown'}`)
         throw new AppError('پاسخی از سرویس هوش مصنوعی دریافت نشد', 502)
+      }
+
+      if (finishReason === 'MAX_TOKENS') {
+        logger.warn('Gemini response truncated due to MAX_TOKENS')
       }
 
       return { text: text.trim() }
@@ -78,7 +94,6 @@ export const callGemini = async (
       const status = axiosErr.response?.status
       const isTimeout = axiosErr.code === 'ECONNABORTED'
 
-      // Do not retry on client errors (bad request, auth, not found)
       if (status && [400, 401, 403, 404].includes(status)) {
         logger.error(`Gemini API client error: status=${status}`)
         throw mapGeminiError(status)
@@ -87,7 +102,7 @@ export const callGemini = async (
       const shouldRetry = attempt < MAX_RETRIES && (isRetryableStatus(status) || isTimeout)
       if (!shouldRetry) break
 
-      const backoffMs = 500 * Math.pow(2, attempt) // 500ms, 1000ms
+      const backoffMs = 400
       logger.warn(`Gemini call failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${backoffMs}ms`)
       await sleep(backoffMs)
     }
