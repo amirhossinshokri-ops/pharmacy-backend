@@ -15,6 +15,7 @@
 | Database | PostgreSQL 15 |
 | Cache / Token Blacklist | Redis |
 | Auth | JWT (Access + Refresh Token) |
+local ai chat
 | Validation | Zod |
 | Upload | Multer + Sharp |
 | Logging | Winston |
