@@ -1,5 +1,5 @@
 import { AppError } from '../middleware/error.middleware'
-import { callGemini, type GeminiContent } from '../utils/gemini-client'
+import { callGroq, type ChatRole } from '../utils/groq-client'
 import {
   detectIntent,
   searchRelevantProducts,
@@ -12,11 +12,10 @@ export interface ChatMessage {
   text: string
 }
 
-const MAX_HISTORY_MESSAGES = 6 // reduced further to shrink prompt size/latency
+const MAX_HISTORY_MESSAGES = 6
 const MAX_RETRIEVED_PRODUCTS = 6
-const MAX_OUTPUT_TOKENS = 300 // short, complete answers are faster and less likely to truncate mid-sentence
+const MAX_OUTPUT_TOKENS = 300
 
-// Kept intentionally short — every extra sentence here adds latency to EVERY request.
 const SYSTEM_INSTRUCTION = `تو دستیار فروشگاه آنلاین "سلامتی‌شاپ" (دارو، مکمل، مراقبت پوست و مو) هستی.
 قوانین:
 - فقط درباره محصولات داخل PRODUCT_CONTEXT صحبت کن؛ قیمت/موجودی/لینک جعلی نساز.
@@ -50,26 +49,30 @@ const buildEnrichedQuery = (userMessage: string, history: ChatMessage[]): string
   return `${lastUserMsg} ${userMessage}`
 }
 
-const toGeminiContents = (
+// Groq uses OpenAI-style roles: system / user / assistant.
+// Our internal history uses 'model' (Gemini-style), so we map it here.
+const toGroqMessages = (
   productContext: string,
   history: ChatMessage[],
   userMessage: string
-): GeminiContent[] => {
-  const contents: GeminiContent[] = [
-    { role: 'user', parts: [{ text: SYSTEM_INSTRUCTION }] },
-    { role: 'model', parts: [{ text: 'باشه، فقط طبق محصولات واقعی پاسخ می‌دم.' }] },
+): ChatRole[] => {
+  const messages: ChatRole[] = [
+    { role: 'system', content: SYSTEM_INSTRUCTION },
   ]
 
   for (const h of trimHistory(history)) {
-    contents.push({ role: h.role, parts: [{ text: h.text }] })
+    messages.push({
+      role: h.role === 'model' ? 'assistant' : 'user',
+      content: h.text,
+    })
   }
 
-  contents.push({
+  messages.push({
     role: 'user',
-    parts: [{ text: `${productContext}\n\nسوال: ${userMessage}` }],
+    content: `${productContext}\n\nسوال: ${userMessage}`,
   })
 
-  return contents
+  return messages
 }
 
 export const sendChatMessage = async (
@@ -94,8 +97,8 @@ export const sendChatMessage = async (
   }
 
   const productContext = buildProductContext(products)
-  const contents = toGeminiContents(productContext, history, userMessage)
+  const messages = toGroqMessages(productContext, history, userMessage)
 
-  const { text } = await callGemini(contents, MAX_OUTPUT_TOKENS)
+  const { text } = await callGroq(messages, MAX_OUTPUT_TOKENS)
   return text
 }
