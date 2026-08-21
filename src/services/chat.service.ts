@@ -1,114 +1,111 @@
-import axios from 'axios'
-import prisma from '../config/database'
 import { AppError } from '../middleware/error.middleware'
+import { callGemini, type GeminiContent } from '../utils/gemini-client'
+import {
+  detectIntent,
+  searchRelevantProducts,
+  findExactProduct,
+  type RetrievedProduct,
+} from './product-retrieval.service'
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent`
-
-interface ChatMessage {
+export interface ChatMessage {
   role: 'user' | 'model'
   text: string
 }
 
-// Cache product catalog for 5 minutes to avoid hitting DB on every message
-let catalogCache: { text: string; expiresAt: number } | null = null
+const MAX_HISTORY_MESSAGES = 10 // keep last N messages (5 turns) to bound prompt size
+const MAX_RETRIEVED_PRODUCTS = 8
 
-const buildProductCatalog = async (): Promise<string> => {
-  if (catalogCache && catalogCache.expiresAt > Date.now()) {
-    return catalogCache.text
+const SYSTEM_INSTRUCTION = `شما دستیار هوشمند فروشگاه آنلاین "سلامتی‌شاپ" هستید — فروشگاه دارو، مکمل و محصولات مراقبت پوست و مو.
+
+قوانین سخت‌گیرانه (باید همیشه رعایت شوند):
+۱. فقط و فقط درباره محصولاتی صحبت کن که در بخش PRODUCT_CONTEXT زیر آمده‌اند.
+۲. هرگز قیمت، موجودی، برند، لینک یا مشخصات محصولی را که در PRODUCT_CONTEXT نیست، نساز یا حدس نزن.
+۳. اگر PRODUCT_CONTEXT خالی بود یا نوشته "هیچ محصول مرتبطی یافت نشد"، صادقانه بگو این محصول یا دسته فعلاً در فروشگاه موجود نیست، و اگر موردی نزدیک در context بود آن را جایگزین پیشنهاد بده.
+۴. اگر محصولی پیشنهاد می‌دهی، لینک آن را دقیقاً به‌صورت /products/{slug} از همان slug داده‌شده در context بساز — هرگز slug جعلی نساز.
+۵. هرگز تشخیص قطعی پزشکی نده، دوز دقیق دارو تجویز نکن، و جای پزشک یا داروساز وانمود نکن. برای مسائل جدی پزشکی، توصیه به مراجعه به پزشک یا داروساز کن — اما بدون افراط در هشدار.
+۶. پاسخ‌ها فارسی، طبیعی، دوستانه و کوتاه باشند (حداکثر ۴ تا ۶ جمله).
+۷. برای احوال‌پرسی ساده (سلام، خوبی و…) پاسخ کوتاه و گرم بده، نیازی به معرفی محصول نیست مگر کاربر بخواهد.`
+
+const buildProductContext = (products: RetrievedProduct[]): string => {
+  if (products.length === 0) {
+    return 'PRODUCT_SEARCH_RESULT:\nهیچ محصول مرتبطی یافت نشد.'
   }
 
-  const products = await prisma.product.findMany({
-    where: { isActive: true },
-    select: {
-      id: true,
-      name: true,
-      slug: true,
-      brand: true,
-      price: true,
-      originalPrice: true,
-      stock: true,
-      description: true,
-      tags: true,
-      rating: true,
-      category: { select: { name: true } },
-    },
-    orderBy: { salesCount: 'desc' },
+  const items = products.map((p, i) => {
+    const stockText = p.stock > 0 ? `موجود (${p.stock} عدد)` : 'ناموجود'
+    return [
+      `PRODUCT ${i + 1}`,
+      `name: ${p.name}`,
+      `brand: ${p.brand || 'نامشخص'}`,
+      `category: ${p.categoryName}`,
+      `price: ${p.price.toLocaleString('fa-IR')} تومان`,
+      `stock: ${stockText}`,
+      `rating: ${p.rating}/5`,
+      `tags: ${p.tags.join('، ') || 'ندارد'}`,
+      `description: ${p.description || 'ندارد'}`,
+      `slug: ${p.slug}`,
+    ].join('\n')
   })
 
-  const catalogText = products.map(p => {
-    const price = Number(p.price).toLocaleString('fa-IR')
-    const stockText = p.stock > 0 ? `موجود (${p.stock} عدد)` : 'ناموجود'
-    return `- «${p.name}» | برند: ${p.brand || 'ندارد'} | دسته: ${p.category?.name} | قیمت: ${price} تومان | ${stockText} | امتیاز: ${p.rating}/5 | برچسب‌ها: ${p.tags.join('، ')} | توضیح: ${p.description || 'ندارد'} | لینک: /products/${p.slug}`
-  }).join('\n')
-
-  const text = products.length > 0
-    ? catalogText
-    : 'در حال حاضر محصولی در فروشگاه ثبت نشده است.'
-
-  catalogCache = { text, expiresAt: Date.now() + 5 * 60 * 1000 }
-  return text
+  return `PRODUCT_SEARCH_RESULT:\n${items.join('\n\n')}`
 }
 
-const buildSystemPrompt = (catalog: string) => `شما دستیار هوشمند فروشگاه آنلاین "سلامتی‌شاپ" هستید — یک فروشگاه دارو، مکمل و محصولات مراقبت پوست و مو.
+const trimHistory = (history: ChatMessage[]): ChatMessage[] => {
+  if (history.length <= MAX_HISTORY_MESSAGES) return history
+  return history.slice(history.length - MAX_HISTORY_MESSAGES)
+}
 
-نقش شما:
-۱. به سوالات کاربران درباره سلامت، پوست، مو و مکمل‌ها پاسخ تخصصی و مختصر بدهید.
-۲. **حتماً و فقط از محصولات واقعی فروشگاه که در لیست زیر آمده استفاده کنید** — هرگز محصولی که در لیست نیست را پیشنهاد ندهید.
-۳. وقتی محصولی پیشنهاد می‌دهید، نام دقیق و قیمت آن را ذکر کنید.
-۴. اگر محصول مناسبی در فروشگاه نبود، صادقانه بگویید که فعلاً چنین محصولی موجود نیست.
-۵. برای مشکلات جدی پزشکی، کاربر را به پزشک ارجاع دهید.
-۶. پاسخ‌ها کوتاه، دوستانه و به فارسی باشند (حداکثر ۴-۵ جمله).
-۷. هرگز دوز دقیق دارو تجویز نکنید.
+const toGeminiContents = (
+  productContext: string,
+  history: ChatMessage[],
+  userMessage: string
+): GeminiContent[] => {
+  const contents: GeminiContent[] = [
+    { role: 'user', parts: [{ text: SYSTEM_INSTRUCTION }] },
+    { role: 'model', parts: [{ text: 'متوجه شدم. فقط بر اساس محصولات واقعی ارائه‌شده پاسخ می‌دهم.' }] },
+  ]
 
-فهرست محصولات موجود در فروشگاه (بروزرسانی لحظه‌ای):
-${catalog}
+  for (const h of trimHistory(history)) {
+    contents.push({ role: h.role, parts: [{ text: h.text }] })
+  }
 
-اگر کاربر درباره محصولی پرسید که در بالا نیست، بگویید فعلاً موجود نیست و نزدیک‌ترین جایگزین موجود را پیشنهاد دهید.`
+  contents.push({
+    role: 'user',
+    parts: [{ text: `${productContext}\n\nپیام کاربر: ${userMessage}` }],
+  })
 
+  return contents
+}
+
+/**
+ * Main entry point: analyzes the query, retrieves only relevant
+ * products from PostgreSQL (never the full catalog), and asks
+ * Gemini to answer using just that context.
+ */
 export const sendChatMessage = async (
   userMessage: string,
   history: ChatMessage[] = []
 ): Promise<string> => {
-  if (!GEMINI_API_KEY) {
-    throw new AppError('سرویس چت در حال حاضر در دسترس نیست', 503)
+  if (!userMessage?.trim()) {
+    throw new AppError('پیام نمی‌تواند خالی باشد', 400)
   }
 
-  try {
-    const catalog = await buildProductCatalog()
-    const systemPrompt = buildSystemPrompt(catalog)
+  const intent = detectIntent(userMessage)
 
-    const contents = [
-      { role: 'user', parts: [{ text: systemPrompt }] },
-      { role: 'model', parts: [{ text: 'متوجه شدم. من فقط محصولات موجود در فروشگاه را معرفی می‌کنم و آماده راهنمایی کاربران هستم.' }] },
-      ...history.map(h => ({ role: h.role, parts: [{ text: h.text }] })),
-      { role: 'user', parts: [{ text: userMessage }] },
-    ]
-
-    const { data } = await axios.post(
-      `${GEMINI_URL}?key=${GEMINI_API_KEY}`,
-      {
-        contents,
-        generationConfig: {
-          temperature: 0.6,
-          maxOutputTokens: 350,
-        },
-      },
-      { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
-    )
-
-    const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text
-    if (!reply) throw new AppError('پاسخی دریافت نشد', 500)
-
-    return reply.trim()
-  } catch (err: any) {
-    if (err instanceof AppError) throw err
-    console.error('Gemini API error:', err.response?.data || err.message)
-    throw new AppError('خطا در ارتباط با سرویس چت. لطفاً دوباره تلاش کنید', 500)
+  let products: RetrievedProduct[] = []
+  if (intent.isProductQuery) {
+    // Try exact name match first (handles "do you have X" queries precisely)
+    const exact = await findExactProduct(userMessage)
+    if (exact) {
+      products = [exact]
+    } else {
+      products = await searchRelevantProducts(userMessage, intent, MAX_RETRIEVED_PRODUCTS)
+    }
   }
-}
 
-// Call this after product create/update/delete to invalidate cache
-export const invalidateCatalogCache = () => {
-  catalogCache = null
+  const productContext = buildProductContext(products)
+  const contents = toGeminiContents(productContext, history, userMessage)
+
+  const { text } = await callGemini(contents)
+  return text
 }
