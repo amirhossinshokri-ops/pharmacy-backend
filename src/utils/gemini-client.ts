@@ -5,10 +5,11 @@ import logger from '../utils/logger'
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash'
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
 
-// Keep well under typical platform/proxy timeouts (Railway/Netlify edge ~ often 10-30s).
-// We must leave headroom for our own retry logic too.
-const REQUEST_TIMEOUT_MS = 12000
-const MAX_RETRIES = 1 // total attempts = 2, to stay within overall latency budget
+// A single retry that also times out just doubles total latency for a user
+// who's already waiting too long. We keep one retry but only for fast-failing
+// errors (429/5xx with immediate response), not for timeouts.
+const REQUEST_TIMEOUT_MS = 15000
+const MAX_RETRIES = 1
 
 export interface GeminiContent {
   role: 'user' | 'model'
@@ -21,14 +22,9 @@ interface GeminiCallResult {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
-const isRetryableStatus = (status?: number): boolean => {
-  if (!status) return true
-  return status === 429 || status >= 500
-}
-
 export const callGemini = async (
   contents: GeminiContent[],
-  maxOutputTokens = 700
+  maxOutputTokens = 300
 ): Promise<GeminiCallResult> => {
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey) {
@@ -41,13 +37,14 @@ export const callGemini = async (
   let lastError: unknown = null
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const startedAt = Date.now()
     try {
       const { data } = await axios.post(
         url,
         {
           contents,
           generationConfig: {
-            temperature: 0.6,
+            temperature: 0.5,
             maxOutputTokens,
           },
           safetySettings: [
@@ -65,6 +62,8 @@ export const callGemini = async (
           timeout: REQUEST_TIMEOUT_MS,
         }
       )
+
+      logger.info(`Gemini call succeeded in ${Date.now() - startedAt}ms`)
 
       const candidate = data?.candidates?.[0]
       const finishReason = candidate?.finishReason
@@ -87,6 +86,7 @@ export const callGemini = async (
       return { text: text.trim() }
     } catch (err) {
       lastError = err
+      const elapsed = Date.now() - startedAt
 
       if (err instanceof AppError) throw err
 
@@ -99,24 +99,30 @@ export const callGemini = async (
         throw mapGeminiError(status)
       }
 
-      const shouldRetry = attempt < MAX_RETRIES && (isRetryableStatus(status) || isTimeout)
-      if (!shouldRetry) break
+      // Never retry a timeout — it just doubles the wait for a slow provider.
+      // Only retry fast-failing transient errors (429/5xx returned quickly).
+      const shouldRetry = attempt < MAX_RETRIES && !isTimeout && isRetryableStatus(status)
+      logger.warn(`Gemini call failed after ${elapsed}ms (status=${status ?? (isTimeout ? 'timeout' : 'network')})`)
 
-      const backoffMs = 400
-      logger.warn(`Gemini call failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${backoffMs}ms`)
-      await sleep(backoffMs)
+      if (!shouldRetry) break
+      await sleep(300)
     }
   }
 
   const axiosErr = lastError as AxiosError
   if (axiosErr?.code === 'ECONNABORTED') {
-    logger.error('Gemini API timeout after retries')
+    logger.error('Gemini API timeout')
     throw new AppError('پاسخ سرویس هوش مصنوعی طول کشید. لطفاً دوباره تلاش کنید', 504)
   }
 
   const status = axiosErr?.response?.status
-  logger.error(`Gemini API failed after retries: status=${status ?? 'network_error'}`)
+  logger.error(`Gemini API failed: status=${status ?? 'network_error'}`)
   throw mapGeminiError(status)
+}
+
+const isRetryableStatus = (status?: number): boolean => {
+  if (!status) return false // network error with no status = don't retry blindly
+  return status === 429 || status >= 500
 }
 
 const mapGeminiError = (status?: number): AppError => {
